@@ -1,8 +1,10 @@
 use std::{fs::{create_dir_all, read_to_string, write, File, OpenOptions}, io::{Cursor, Error, Read, Write}, path::Path, process::exit};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 
-fn align(value: usize, alignment: usize) -> usize {
-    return (value + alignment) / alignment * alignment;
+const CHUNK_SIZE: usize = 0x200;
+
+fn next_chunk(position: usize, chunk_size: usize) -> usize {
+    (chunk_size - position % chunk_size) % chunk_size
 }
 
 fn xor_hash(data: &[u8]) -> u8 {
@@ -32,9 +34,9 @@ pub fn unpack(input: &Path, outdir: &Path, verbose: bool) -> Result<(), Error> {
     let mut pos;
     for i in 0..namelist_chunks.max(1) {
         pos = 3;
-        let off = 0x200 * i;
+        let off = CHUNK_SIZE * i;
 
-        while pos+off < namelist_data.len() && pos < 0x200 {
+        while pos+off < namelist_data.len() && pos < CHUNK_SIZE {
             let filename_len = namelist_data[pos+off] as usize;
             if filename_len == 0 {
                 pos += 1;
@@ -70,9 +72,8 @@ pub fn unpack(input: &Path, outdir: &Path, verbose: bool) -> Result<(), Error> {
         let mut file_count = r.read_u16::<LittleEndian>()? as usize;
         r.read_u32::<LittleEndian>()?;
 
-        let mut done = true;
-        if file_count == 0xFFFF {
-            done = false;
+        let done = file_count != 0xFFFF;
+        if !done {
             file_count = 0x3F;
         }
 
@@ -96,10 +97,13 @@ pub fn unpack(input: &Path, outdir: &Path, verbose: bool) -> Result<(), Error> {
         }
 
         remaining_files -= file_count;
-        if done { break; };
+        if done { break }
     }
 
-    let data_start = align(r.position() as usize, 0x200);
+    let data_start = {
+        let pos = r.position() as usize;
+        pos + next_chunk(pos, CHUNK_SIZE)
+    };
     create_dir_all(outdir)?;
     if verbose {
         println!("Data starts at: 0x{data_start:X}");
@@ -150,13 +154,13 @@ pub fn pack(input: &Path, outdir: &Path, verbose: bool) -> Result<(), Error> {
         w.write_all(name)?;
         assert_eq!(file_entry.len(), 2 + name.len());
 
-        if 3 + fsecs.last().unwrap().len() + file_entry.len() >= 0x200 {
+        if 3 + fsecs.last().unwrap().len() + file_entry.len() >= CHUNK_SIZE {
             let cur_len = fsecs.last().unwrap().len();
-            fsecs.last_mut().unwrap().append(&mut b"\x00".repeat(0x200 - (cur_len + 3)));
+            fsecs.last_mut().unwrap().extend(vec![0x00; CHUNK_SIZE - (cur_len + 3)]);
             fsecs.push(vec![]);
         }
 
-        fsecs.last_mut().unwrap().append(&mut file_entry);
+        fsecs.last_mut().unwrap().extend(file_entry);
         files.push(line);
 
         if verbose {
@@ -175,44 +179,39 @@ pub fn pack(input: &Path, outdir: &Path, verbose: bool) -> Result<(), Error> {
             datalist.push(vec![]);
         }
         datalist.last_mut().unwrap().push((datastr.len(), contents.len()));
-        datastr.append(&mut contents);
-
-        if datastr.len() % 0x200 > 0 {
-            datastr.append(&mut b"\x00".repeat(0x200 - datastr.len() % 0x200));
-        }
+        datastr.extend(contents);
+        datastr.extend(vec![0; next_chunk(datastr.len(), CHUNK_SIZE)]);
     }
 
     let mut result = vec![];
-    if fsecs.len() == 1 && datalist.len() == 1 && 3 + fsecs[0].len() + datalist[0].len() * 8 + 9 <= 0x200 {
+    if fsecs.len() == 1 && datalist.len() == 1 && 3 + fsecs[0].len() + datalist[0].len() * 8 + 9 <= CHUNK_SIZE {
         result.write_u16::<LittleEndian>(fsecs[0].len() as u16 + 4)?;
         result.write_u8(0x00)?;
-        result.extend_from_slice(&fsecs[0]);
-        result.extend_from_slice(b"\x00\x00\x00");
+        result.extend(&fsecs[0]);
+        result.extend(vec![0; 3]);
         result.write_u16::<LittleEndian>(datalist[0].len() as u16)?;
-        result.extend_from_slice(b"\x00\x00\x00\x00");
+        result.extend(vec![0; 4]);
         for (a, b) in &datalist[0] {
             result.write_u32::<LittleEndian>(*a as u32)?;
             result.write_u32::<LittleEndian>(*b as u32)?;
         }
     } else {
         for sec in &fsecs {
-            result.extend_from_slice(b"\x00\x00");
+            result.extend(b"\x00\x00");
             result.write_u8(fsecs.len() as u8)?;
-            result.extend_from_slice(sec);
+            result.extend(sec);
         }
 
-        if result.len() % 0x200 > 0 {
-            result.append(&mut b"\x00".repeat(0x200 - result.len() % 0x200));
-        }
+        result.extend(vec![0; next_chunk(result.len(), CHUNK_SIZE)]);
 
         for i in 0..datalist.len() {
-            result.write(b"\x00\x00")?;
+            result.extend(vec![0; 2]);
             if i+1 == datalist.len() {
                 result.write_u16::<LittleEndian>(datalist[i].len() as u16)?;
             } else {
-                result.write(b"\xFF\xFF")?;
+                result.extend(vec![0xFF; 2]);
             }
-            result.write(b"\x00\x00\x00\x00")?;
+            result.extend(vec![0; 4]);
             for (a, b) in &datalist[i] {
                 result.write_u32::<LittleEndian>(*a as u32)?;
                 result.write_u32::<LittleEndian>(*b as u32)?;
@@ -220,11 +219,8 @@ pub fn pack(input: &Path, outdir: &Path, verbose: bool) -> Result<(), Error> {
         }
     }
 
-    if result.len() % 0x200 > 0 {
-        result.append(&mut b"\x00".repeat(0x200 - result.len() % 0x200));
-    }
-
-    result.append(&mut datastr);
+    result.extend(vec![0; next_chunk(result.len(), CHUNK_SIZE)]);
+    result.extend(datastr);
 
     create_dir_all(outdir)?;
 
