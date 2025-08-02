@@ -1,7 +1,7 @@
 # ygopac
 
 A tool for unpacking and repacking `.pac` files from the Yu-Gi-Oh! NDS games. This tool was mainly
-developed for Over the Nexus, but it works for all World Championship games for the DS
+developed for Over the Nexus, but it works for all World Championship games on the DS
 (2007 - 2011).
 
 There is a [python script](pacman.py) for people who don't want to use the rust version.
@@ -20,3 +20,5 @@ out everything written there and then implemented this tool. I was interested if
 done something similar, but the best I could find was [Nexus Revival](https://github.com/johnson-cooper/YGO-NEXUS-REVIVAL)
 (which is a cool mod for Over the Nexus that you should check out!). The code they've used is not
 as generic as this implementation.
+
+*This project is not affiliated with or endorsed by Nintendo, Konami and Shueisha.*
